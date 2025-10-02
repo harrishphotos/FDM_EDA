@@ -8,7 +8,10 @@ import plotly.graph_objects as go
 import streamlit as st
 
 
-WORKSPACE_ROOT = "/Users/harish/FDM_EDA"
+# Determine the workspace root dynamically
+# Assumes the script is in streamlit_app and the data is in the parent directory
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+WORKSPACE_ROOT = os.path.dirname(SCRIPT_DIR)
 CSV_PATH = os.path.join(WORKSPACE_ROOT, "NYC_YELLOW_TAXI_CLEAN.csv")
 PARQUET_PATH = os.path.join(WORKSPACE_ROOT, "NYC_YELLOW_TAXI_CLEAN.parquet")
 ZONES_GEOJSON_PATH = os.path.join(WORKSPACE_ROOT, "Docs", "taxi_zones.geojson")
