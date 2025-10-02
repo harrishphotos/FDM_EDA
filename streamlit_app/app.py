@@ -7,6 +7,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from time_analysis import render_time_analysis
+
 
 WORKSPACE_ROOT = "/Users/harish/FDM_EDA"
 CSV_PATH = os.path.join(WORKSPACE_ROOT, "NYC_YELLOW_TAXI_CLEAN.csv")
@@ -224,7 +226,9 @@ def tab_flows(df: pd.DataFrame) -> None:
         .agg(Trips=("VendorID", "count"), Revenue=("total_amount", "sum"))
         .sort_values("Trips", ascending=False)
         .head(k)
+        .reset_index(drop=True)
     )
+    flows.index = flows.index + 1
     st.dataframe(flows.rename(columns={"PU_Zone": "Pickup zone", "DO_Zone": "Dropoff zone"}))
 
     # Sankey of top flows
@@ -253,13 +257,23 @@ def tab_flows(df: pd.DataFrame) -> None:
 
 
 def tab_airports(df: pd.DataFrame) -> None:
+    st.markdown("""
+    Airport trips are identified by zone names containing "Airport" (JFK, LaGuardia, Newark).
+    Below: top 20 airport origin→destination routes.
+    """)
     # Heuristic by zone name contains "Airport"
     airport_mask = df["PU_Zone"].str.contains("Airport", case=False, na=False) | df["DO_Zone"].str.contains("Airport", case=False, na=False)
     adf = df.loc[airport_mask]
-    st.write(f"Airport-related trips: {len(adf):,}")
-    flows = adf.groupby(["PU_Zone", "DO_Zone"], as_index=False).agg(trips=("VendorID", "count"), revenue=("total_amount", "sum"))
-    flows = flows.sort_values("trips", ascending=False).head(20)
-    st.dataframe(flows)
+    st.write(f"**Airport-related trips**: {len(adf):,}")
+    flows = (
+        adf.groupby(["PU_Zone", "DO_Zone"], as_index=False)
+        .agg(Trips=("VendorID", "count"), Revenue=("total_amount", "sum"))
+        .sort_values("Trips", ascending=False)
+        .head(20)
+        .reset_index(drop=True)
+    )
+    flows.index = flows.index + 1
+    st.dataframe(flows.rename(columns={"PU_Zone": "Pickup zone", "DO_Zone": "Dropoff zone"}))
 
 
 def main() -> None:
@@ -269,12 +283,14 @@ def main() -> None:
     df_all = load_data()
     df = filter_df(df_all)
 
-    tabs = st.tabs(["Overview", "Trends", "Map", "Hotspots", "Zones", "Flows", "Airports"])
+    tabs = st.tabs(["Overview", "Trends", "Time Analysis", "Map", "Hotspots", "Zones", "Flows", "Airports"])
     with tabs[0]:
         tab_overview(df)
     with tabs[1]:
         tab_trends(df)
     with tabs[2]:
+        render_time_analysis(df)
+    with tabs[3]:
         st.markdown("""
         **Interactive NYC Taxi Zone Heatmap**: Explore pickup and dropoff demand across all 263 official taxi zones.
         Hover over zones to see names, trip counts, and rankings. Use the comparison view to spot imbalances.
@@ -284,6 +300,8 @@ def main() -> None:
         col1, col2 = st.columns([1, 1])
         with col1:
             mode = st.radio("Show", ["Pickups", "Dropoffs", "Side-by-side"], horizontal=True, key="map_mode")
+        
+        show_top = False
         with col2:
             if mode != "Side-by-side":
                 show_top = st.checkbox("Show top 10 zones summary", value=True)
@@ -482,13 +500,13 @@ def main() -> None:
                     coloraxis_colorbar_title_text="Trips"
                 )
                 st.plotly_chart(fig, use_container_width=True)
-    with tabs[3]:
-        tab_hotspots(df)
     with tabs[4]:
-        tab_zones(df)
+        tab_hotspots(df)
     with tabs[5]:
-        tab_flows(df)
+        tab_zones(df)
     with tabs[6]:
+        tab_flows(df)
+    with tabs[7]:
         tab_airports(df)
 
 
