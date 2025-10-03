@@ -6,13 +6,37 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import pickle
+import joblib
 
 
-WORKSPACE_ROOT = "/Users/harish/FDM_EDA"
+
+WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CSV_PATH = os.path.join(WORKSPACE_ROOT, "NYC_YELLOW_TAXI_CLEAN.csv")
 PARQUET_PATH = os.path.join(WORKSPACE_ROOT, "NYC_YELLOW_TAXI_CLEAN.parquet")
 ZONES_GEOJSON_PATH = os.path.join(WORKSPACE_ROOT, "Docs", "taxi_zones.geojson")
+FARE_MODEL_PATH = os.path.join(WORKSPACE_ROOT, "models","fare_model.pkl")
+TIP_MODEL_PATH = os.path.join(WORKSPACE_ROOT,"models", "tip_model.pkl")
 
+
+# Load ML models
+
+@st.cache_data(show_spinner=False)
+def load_models():
+    with open(FARE_MODEL_PATH, "rb") as f:
+        fare_model = joblib.load(f)
+    with open(TIP_MODEL_PATH, "rb") as f:
+        tip_model = joblib.load(f)
+    return fare_model, tip_model
+
+fare_model, tip_model = load_models()
+if fare_model and tip_model:
+    st.success("Models loaded successfully!")
+else:
+    st.error("Models could not be loaded.")
+    
+fare_model = joblib.load("streamlit_app/models/fare_model.pkl")
+tip_model = joblib.load("streamlit_app/models/tip_model.pkl")
 
 @st.cache_data(show_spinner=False)
 def load_data() -> pd.DataFrame:
