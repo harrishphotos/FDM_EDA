@@ -74,5 +74,5 @@ coverage.xml
 .DS_Store
 Thumbs.db
 
-*.pkl
+streamlit_app/models/*.pkl
 
