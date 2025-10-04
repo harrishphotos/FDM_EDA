@@ -47,32 +47,8 @@ htmlcov/
 .cache
 nosetests.xml
 coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-
-# Jupyter
-.ipynb_checkpoints
-
-# FastAPI / Uvicorn / Gunicorn
-*.log
-*.db
-*.sqlite3
-
-# Local configs
-.env
-.env.*
-!.env.example
-
-# IDE / Editors
-.vscode/
-.idea/
-*.iml
-
 # Mac / Linux / Windows junk
 .DS_Store
 Thumbs.db
 
-
-FDM_MLB_G07.pdf
+*.pdf
