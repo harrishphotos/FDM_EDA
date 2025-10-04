@@ -192,41 +192,6 @@ def tab_trends(df: pd.DataFrame) -> None:
     st.markdown("**Average fare per month**: pricing/trip-length proxy; affected by surcharges and route mix.")
     st.plotly_chart(fig3, use_container_width=True)
 
-    st.markdown("---")
-    st.markdown("### Hourly & Daily Demand Patterns")
-    
-    hourly = df.groupby("pickup_hour", as_index=False).agg(Trips=("VendorID", "count"))
-    fig_hourly = px.line(hourly, x="pickup_hour", y="Trips", markers=True, title="Demand by Hour of Day")
-    fig_hourly.update_layout(xaxis_title="Hour of Day (0-23)", yaxis_title="Trips")
-    st.markdown("**Hourly demand**: identifies rush hour peaks (typically 8-9 AM, 5-7 PM) and off-peak periods.")
-    st.plotly_chart(fig_hourly, use_container_width=True)
-
-    dow_map = {0: "Monday", 1: "Tuesday", 2: "Wednesday", 3: "Thursday", 4: "Friday", 5: "Saturday", 6: "Sunday"}
-    df_dow = df.copy()
-    df_dow["pickup_dow_name"] = df_dow["pickup_dow"].map(dow_map)
-    daily = df_dow.groupby("pickup_dow_name", as_index=False).agg(Trips=("VendorID", "count"))
-    daily["pickup_dow_name"] = pd.Categorical(daily["pickup_dow_name"], categories=list(dow_map.values()), ordered=True)
-    daily = daily.sort_values("pickup_dow_name")
-    fig_daily = px.bar(daily, x="pickup_dow_name", y="Trips", title="Demand by Day of Week")
-    fig_daily.update_layout(xaxis_title="Day of Week", yaxis_title="Trips")
-    st.markdown("**Daily demand**: compares weekday vs weekend trip volumes.")
-    st.plotly_chart(fig_daily, use_container_width=True)
-
-    heatmap_data = df_dow.groupby(["pickup_hour", "pickup_dow_name"], as_index=False).agg(Trips=("VendorID", "count"))
-    heatmap_pivot = heatmap_data.pivot(index="pickup_hour", columns="pickup_dow_name", values="Trips").fillna(0)
-    heatmap_pivot = heatmap_pivot.reindex(index=list(range(24)), columns=list(dow_map.values()), fill_value=0)
-    fig_heatmap = px.imshow(
-        heatmap_pivot, 
-        labels=dict(x="Day of Week", y="Hour of Day", color="Trips"),
-        x=list(dow_map.values()),
-        y=list(range(24)),
-        color_continuous_scale="YlOrRd",
-        title="Demand Heatmap: Hour × Day of Week"
-    )
-    fig_heatmap.update_layout(xaxis_title="Day of Week", yaxis_title="Hour of Day")
-    st.markdown("**Heatmap**: reveals peak hours on specific days (e.g., Friday 6 PM vs Monday 8 AM).")
-    st.plotly_chart(fig_heatmap, use_container_width=True)
-
 
  
 
@@ -288,23 +253,48 @@ def tab_flows(df: pd.DataFrame) -> None:
         .head(k)
     )
     st.dataframe(flows.rename(columns={"PU_Zone": "Pickup zone", "DO_Zone": "Dropoff zone"}))
-
-    # Sankey of top flows
+    # Sankey of top flows (fixed: previously duplicated every zone on target side creating visual clutter)
+    # Build a single set of nodes so zones that appear as both pickup and dropoff are unified.
     zones = pd.unique(pd.concat([flows["PU_Zone"], flows["DO_Zone"]], ignore_index=True))
-    index = {z: i for i, z in enumerate(zones)}
-    sources = [index[z] for z in flows["PU_Zone"]]
-    targets = [index[z] + len(zones) for z in flows["DO_Zone"]]  # separate target space
-    labels = list(zones) + [f"{z}" for z in zones]
+    zone_index = {z: i for i, z in enumerate(zones)}
+    sources = flows["PU_Zone"].map(zone_index).tolist()
+    targets = flows["DO_Zone"].map(zone_index).tolist()
     values = flows["Trips"].tolist()
+
+    # Optional: color nodes by total involvement (sum of trips where they are source or target)
+    involvement = {z: 0 for z in zones}
+    for (pu, do, trips) in flows[["PU_Zone", "DO_Zone", "Trips"]].itertuples(index=False):
+        involvement[pu] += trips
+        involvement[do] += trips
+    max_involve = max(involvement.values()) if involvement else 1
+    # Generate a light-to-strong blue scale based on involvement
+    node_colors = [f"rgba(30, 144, 255, {0.3 + 0.7*involvement[z]/max_involve:.3f})" for z in zones]
+
     sankey = go.Figure(
         data=[
             go.Sankey(
-                node=dict(label=labels, pad=10, thickness=12),
-                link=dict(source=sources, target=targets, value=values),
+                arrangement="snap",
+                node=dict(
+                    label=list(zones),
+                    pad=12,
+                    thickness=14,
+                    line=dict(color="rgba(255,255,255,0.15)", width=1),
+                    color=node_colors,
+                ),
+                link=dict(
+                    source=sources,
+                    target=targets,
+                    value=values,
+                    hovertemplate="%{source.label} → %{target.label}<br>Trips: %{value:,}<extra></extra>",
+                ),
             )
         ]
     )
-    sankey.update_layout(title_text="Top flows by trips")
+    sankey.update_layout(
+        title_text="Top flows by trips",
+        margin=dict(l=10, r=10, t=40, b=10),
+        font=dict(size=12),
+    )
     st.plotly_chart(sankey, use_container_width=True)
 
 
@@ -322,88 +312,6 @@ def tab_airports(df: pd.DataFrame) -> None:
     flows = adf.groupby(["PU_Zone", "DO_Zone"], as_index=False).agg(trips=("VendorID", "count"), revenue=("total_amount", "sum"))
     flows = flows.sort_values("trips", ascending=False).head(20)
     st.dataframe(flows)
-
-
-def tab_financial_analysis(df: pd.DataFrame) -> None:
-    st.markdown("""
-    Analyze financial relationships in taxi operations: tipping patterns, fare distributions, and revenue drivers.
-    """)
-    
-    payment_labels = {1: "Credit card", 2: "Cash", 3: "No charge", 4: "Dispute", 5: "Unknown", 6: "Voided trip"}
-    df_labeled = df.copy()
-    df_labeled["payment_type_label"] = df_labeled["payment_type"].map(payment_labels).fillna("Unknown")
-    
-    st.markdown("### Tip Analysis by Payment Type")
-    tip_by_payment = df_labeled[df_labeled["fare_amount"] > 0].groupby("payment_type_label", as_index=False).agg(
-        avg_tip_pct=("tip_pct", "mean"),
-        avg_tip_amount=("tip_amount", "mean"),
-        trips=("VendorID", "count")
-    )
-    tip_by_payment = tip_by_payment[tip_by_payment["trips"] >= 10]
-    tip_by_payment["avg_tip_pct"] = tip_by_payment["avg_tip_pct"] * 100
-    
-    fig_tip = px.bar(
-        tip_by_payment.sort_values("avg_tip_pct", ascending=False), 
-        x="payment_type_label", 
-        y="avg_tip_pct",
-        title="Average Tip Percentage by Payment Type",
-        labels={"payment_type_label": "Payment Type", "avg_tip_pct": "Avg Tip %"}
-    )
-    fig_tip.update_layout(xaxis_title="Payment Type", yaxis_title="Average Tip (%)")
-    st.markdown("**Key insight**: Credit card payments typically yield higher tip percentages than cash.")
-    st.plotly_chart(fig_tip, use_container_width=True)
-    
-    st.markdown("### Fare Distribution")
-    df_fare = df[df["fare_amount"] > 0]
-    fig_fare_hist = px.histogram(
-        df_fare[df_fare["fare_amount"] <= 100], 
-        x="fare_amount", 
-        nbins=50,
-        title="Fare Amount Distribution (≤$100)",
-        labels={"fare_amount": "Fare Amount (USD)"}
-    )
-    fig_fare_hist.update_layout(xaxis_title="Fare Amount (USD)", yaxis_title="Frequency")
-    st.markdown("**Distribution**: Most fares cluster between $5-$20, with a long tail for airport/distant trips.")
-    st.plotly_chart(fig_fare_hist, use_container_width=True)
-    
-    st.markdown("### Tip Percentage by Distance")
-    df_dist = df[(df["fare_amount"] > 0) & (df["trip_distance"] > 0)].copy()
-    df_dist["distance_bin"] = pd.cut(
-        df_dist["trip_distance"], 
-        bins=[0, 2, 5, 10, 100], 
-        labels=["0-2 mi", "2-5 mi", "5-10 mi", "10+ mi"]
-    )
-    tip_by_dist = df_dist.groupby("distance_bin", as_index=False).agg(
-        avg_tip_pct=("tip_pct", "mean"),
-        trips=("VendorID", "count")
-    )
-    tip_by_dist["avg_tip_pct"] = tip_by_dist["avg_tip_pct"] * 100
-    
-    fig_tip_dist = px.bar(
-        tip_by_dist, 
-        x="distance_bin", 
-        y="avg_tip_pct",
-        title="Average Tip Percentage by Trip Distance",
-        labels={"distance_bin": "Distance Range", "avg_tip_pct": "Avg Tip %"}
-    )
-    fig_tip_dist.update_layout(xaxis_title="Distance Range", yaxis_title="Average Tip (%)")
-    st.markdown("**Pattern**: Longer trips may show different tipping behavior (percentage vs absolute amount).")
-    st.plotly_chart(fig_tip_dist, use_container_width=True)
-    
-    st.markdown("### Trip Duration vs Fare")
-    sample_df = df_fare.sample(n=min(5000, len(df_fare)), random_state=42)
-    fig_scatter = px.scatter(
-        sample_df,
-        x="trip_duration_min",
-        y="fare_amount",
-        opacity=0.3,
-        title="Trip Duration vs Fare Amount (5,000 sample)",
-        labels={"trip_duration_min": "Trip Duration (min)", "fare_amount": "Fare Amount (USD)"},
-        trendline="ols"
-    )
-    fig_scatter.update_layout(xaxis_title="Trip Duration (min)", yaxis_title="Fare Amount (USD)")
-    st.markdown("**Correlation**: Positive relationship between duration and fare, with high variance (traffic, distance).")
-    st.plotly_chart(fig_scatter, use_container_width=True)
 
 
 def tab_predictions(fare_model, tip_model, zones_df: pd.DataFrame) -> None:
@@ -429,17 +337,27 @@ def tab_predictions(fare_model, tip_model, zones_df: pd.DataFrame) -> None:
     
     with col1:
         st.markdown("**📍 Location Information**")
+        # Safely compute default indices as plain Python ints (Streamlit requires native int, not pandas Int64)
+        try:
+            default_pu_idx = int(zone_options[zone_options['Zone'] == 'Times Sq/Theatre District'].index[0])
+        except Exception:
+            default_pu_idx = 0
+        try:
+            default_do_idx = int(zone_options[zone_options['Zone'] == 'JFK Airport'].index[0])
+        except Exception:
+            # Fallback to 1 if possible else 0
+            default_do_idx = 1 if len(zone_options) > 1 else 0
         pu_zone = st.selectbox(
             "Pickup Location",
             options=zone_options['display'].tolist(),
-            index=int(zone_options[zone_options['Zone'] == 'Times Sq/Theatre District'].index[0]) if len(zone_options[zone_options['Zone'] == 'Times Sq/Theatre District']) > 0 else 0,
+            index=default_pu_idx,
             help="Select the pickup zone"
         )
         
         do_zone = st.selectbox(
             "Dropoff Location",
             options=zone_options['display'].tolist(),
-            index=int(zone_options[zone_options['Zone'] == 'JFK Airport'].index[0]) if len(zone_options[zone_options['Zone'] == 'JFK Airport']) > 0 else 1,
+            index=default_do_idx,
             help="Select the dropoff zone"
         )
         
@@ -478,38 +396,6 @@ def tab_predictions(fare_model, tip_model, zones_df: pd.DataFrame) -> None:
             value=12,
             help="Hour of day for pickup (0-23)"
         )
-    
-    st.markdown("---")
-    
-    with st.expander("📊 Model Performance Metrics", expanded=False):
-        st.markdown("#### Fare Prediction Models")
-        fare_col1, fare_col2 = st.columns(2)
-        
-        with fare_col1:
-            st.markdown("**Linear Regression**")
-            st.metric("RMSE", "$10.08")
-            st.metric("R² Score", "0.727")
-        
-        with fare_col2:
-            st.markdown("**Random Forest** ⭐")
-            st.metric("RMSE", "$9.46")
-            st.metric("R² Score", "0.759")
-        
-        st.markdown("---")
-        st.markdown("#### Tip Prediction Models")
-        tip_col1, tip_col2 = st.columns(2)
-        
-        with tip_col1:
-            st.markdown("**Logistic Regression** ⭐")
-            st.metric("Accuracy", "0.635")
-            st.metric("F1 Score", "0.777")
-        
-        with tip_col2:
-            st.markdown("**Random Forest**")
-            st.metric("Accuracy", "0.615")
-            st.metric("F1 Score", "0.720")
-        
-        st.info("⭐ = Model currently in use for predictions")
     
     st.markdown("---")
     
@@ -560,47 +446,8 @@ def tab_predictions(fare_model, tip_model, zones_df: pd.DataFrame) -> None:
                     value=f"${estimated_tip:.2f}",
                     help="Estimated tip amount (15% avg when tipped)"
                 )
-            
-            st.markdown("---")
-            
-            # Additional insights
-            st.markdown("### 📊 Trip Summary")
-            summary_col1, summary_col2 = st.columns(2)
-            
-            with summary_col1:
-                st.markdown(f"""
-                **Route Details:**
-                - 📍 From: {pu_zone.split(' (')[0]}
-                - 🎯 To: {do_zone.split(' (')[0]}
-                - 📏 Distance: {trip_distance:.1f} miles
-                - ⏱️ Duration: {trip_duration} minutes
-                """)
-            
-            with summary_col2:
-                total_estimated = fare_pred + estimated_tip
-                avg_speed = (trip_distance / trip_duration * 60) if trip_duration > 0 else 0
-                st.markdown(f"""
-                **Financial Estimates:**
-                - 💵 Base Fare: ${fare_pred:.2f}
-                - 🎁 Expected Tip: ${estimated_tip:.2f}
-                - 💰 **Total Expected: ${total_estimated:.2f}**
-                - 🚗 Avg Speed: {avg_speed:.1f} mph
-                """)
-            
-            # Model info
-            with st.expander("ℹ️ About These Predictions"):
-                st.markdown("""
-                **Model Information:**
-                - **Fare Model**: Trained on historical NYC taxi data to predict base fare amounts
-                - **Tip Model**: Predicts probability of receiving tips greater than $2
-                - **Features Used**: trip_distance, passenger_count, trip_duration_min, pickup_hour
-                
-                **Notes:**
-                - Predictions are estimates based on historical patterns
-                - Actual fares may vary due to traffic, route changes, and surcharges
-                - Tip amounts assume 15% average when tips are given
-                - Does not include tolls, extras, or surcharges
-                """)
+            # Section below (Trip Summary & model info) removed per user request
+            # If needed in the future, consider adding a toggle to show/hide detailed breakdown.
                 
         except Exception as e:
             st.error(f"❌ Prediction error: {e}")
@@ -630,7 +477,7 @@ def main() -> None:
         df_all = load_data()
         df = filter_df(df_all)
 
-        tabs = st.tabs(["Overview", "Trends", "Map", "Hotspots", "Zones", "Flows", "Airports", "Financial Analysis"])
+        tabs = st.tabs(["Overview", "Trends", "Map", "Hotspots", "Zones", "Flows", "Airports"])
         with tabs[0]:
             tab_overview(df)
         with tabs[1]:
@@ -851,8 +698,6 @@ def main() -> None:
             tab_flows(df)
         with tabs[6]:
             tab_airports(df)
-        with tabs[7]:
-            tab_financial_analysis(df)
 
 
 if __name__ == "__main__":
