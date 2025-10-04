@@ -52,3 +52,11 @@ coverage.xml
 Thumbs.db
 
 *.pdf
+
+# Documentation files
+Docs/Markdown/FDM - IT3051- Mini Project - 2025 - finalized instructions.md
+Docs/Markdown/FDM Mini Project-marking grid.md
+Docs/Markdown/Final submission guidelines.md
+Docs/Markdown/scope of work.md
+IMPLEMENTATION_PLAN.md
+PREDICTION_UI_GUIDE.md
