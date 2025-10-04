@@ -8,9 +8,11 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from time_analysis import render_time_analysis
+from predictions import render_fare_prediction, render_tip_prediction
 
 
-WORKSPACE_ROOT = "/Users/harish/FDM_EDA"
+# Get workspace root dynamically (works both locally and on Streamlit Cloud)
+WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CSV_PATH = os.path.join(WORKSPACE_ROOT, "NYC_YELLOW_TAXI_CLEAN.csv")
 PARQUET_PATH = os.path.join(WORKSPACE_ROOT, "NYC_YELLOW_TAXI_CLEAN.parquet")
 ZONES_GEOJSON_PATH = os.path.join(WORKSPACE_ROOT, "Docs", "taxi_zones.geojson")
@@ -283,7 +285,7 @@ def main() -> None:
     df_all = load_data()
     df = filter_df(df_all)
 
-    tabs = st.tabs(["Overview", "Trends", "Time Analysis", "Map", "Hotspots", "Zones", "Flows", "Airports"])
+    tabs = st.tabs(["Overview", "Trends", "Time Analysis", "Map", "Hotspots", "Zones", "Flows", "Airports", "Fare Prediction", "Tip Prediction"])
     with tabs[0]:
         tab_overview(df)
     with tabs[1]:
@@ -508,6 +510,10 @@ def main() -> None:
         tab_flows(df)
     with tabs[7]:
         tab_airports(df)
+    with tabs[8]:
+        render_fare_prediction(df)
+    with tabs[9]:
+        render_tip_prediction(df)
 
 
 if __name__ == "__main__":
