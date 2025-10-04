@@ -47,30 +47,18 @@ htmlcov/
 .cache
 nosetests.xml
 coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-
-# Jupyter
-.ipynb_checkpoints
-
-# FastAPI / Uvicorn / Gunicorn
-*.log
-*.db
-*.sqlite3
-
-# Local configs
-.env
-.env.*
-!.env.example
-
-# IDE / Editors
-.vscode/
-.idea/
-*.iml
-
 # Mac / Linux / Windows junk
 .DS_Store
 Thumbs.db
+
+*.pdf
+
+# Documentation files
+Docs/Markdown/FDM - IT3051- Mini Project - 2025 - finalized instructions.md
+Docs/Markdown/FDM Mini Project-marking grid.md
+Docs/Markdown/Final submission guidelines.md
+Docs/Markdown/scope of work.md
+IMPLEMENTATION_PLAN.md
+PREDICTION_UI_GUIDE.md
 presentation_script.md
+plan.md

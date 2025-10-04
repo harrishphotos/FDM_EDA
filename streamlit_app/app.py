@@ -6,16 +6,15 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import joblib
 
-from time_analysis import render_time_analysis
-from predictions import render_fare_prediction, render_tip_prediction
-
-
-# Get workspace root dynamically (works both locally and on Streamlit Cloud)
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CSV_PATH = os.path.join(WORKSPACE_ROOT, "NYC_YELLOW_TAXI_CLEAN.csv")
 PARQUET_PATH = os.path.join(WORKSPACE_ROOT, "NYC_YELLOW_TAXI_CLEAN.parquet")
 ZONES_GEOJSON_PATH = os.path.join(WORKSPACE_ROOT, "Docs", "taxi_zones.geojson")
+FARE_MODEL_PATH = os.path.join(WORKSPACE_ROOT, "fare_model.pkl")
+TIP_MODEL_PATH = os.path.join(WORKSPACE_ROOT, "tip_model.pkl")
+ZONE_LOOKUP_PATH = os.path.join(WORKSPACE_ROOT, "Docs", "taxi_zone_lookup.csv")
 
 
 @st.cache_data(show_spinner=False)
@@ -35,6 +34,26 @@ def load_data() -> pd.DataFrame:
     with np.errstate(divide="ignore", invalid="ignore"):
         df["tip_pct"] = (df["tip_amount"] / df["fare_amount"]).replace([np.inf, -np.inf], np.nan)
     return df
+
+
+@st.cache_resource(show_spinner=False)
+def load_models():
+    """Load trained fare and tip prediction models"""
+    try:
+        fare_model = joblib.load(FARE_MODEL_PATH)
+        tip_model = joblib.load(TIP_MODEL_PATH)
+        return fare_model, tip_model
+    except Exception as e:
+        st.error(f"Error loading models: {e}")
+        return None, None
+
+
+@st.cache_data(show_spinner=False)
+def load_zone_lookup() -> pd.DataFrame:
+    """Load taxi zone lookup data"""
+    zones = pd.read_csv(ZONE_LOOKUP_PATH)
+    zones.columns = [c.strip() for c in zones.columns]
+    return zones
 
 
 def filter_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -170,7 +189,35 @@ def tab_trends(df: pd.DataFrame) -> None:
     st.plotly_chart(fig3, use_container_width=True)
 
 
- 
+def tab_time_analysis(df: pd.DataFrame) -> None:
+    st.markdown("""
+    Analyze trip patterns by hour, day of week, and time of day to identify peak periods and optimize operations.
+    """)
+    
+    st.markdown("### Hourly Patterns")
+    hourly = df.groupby("pickup_hour", as_index=False).agg(
+        Trips=("VendorID", "count"),
+        Avg_Fare=("fare_amount", "mean"),
+        Avg_Duration=("trip_duration_min", "mean")
+    )
+    
+    fig_hourly = px.bar(hourly, x="pickup_hour", y="Trips", title="Trips by hour of day")
+    fig_hourly.update_layout(xaxis_title="Hour of day", yaxis_title="Number of trips")
+    st.plotly_chart(fig_hourly, use_container_width=True)
+    
+    st.markdown("### Day of week patterns")
+    dow_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    dow = df.groupby("pickup_dow", as_index=False).agg(
+        Trips=("VendorID", "count"),
+        Avg_Fare=("fare_amount", "mean")
+    )
+    dow["pickup_dow"] = pd.Categorical(dow["pickup_dow"], categories=dow_order, ordered=True)
+    dow = dow.sort_values("pickup_dow")
+    
+    fig_dow = px.bar(dow, x="pickup_dow", y="Trips", title="Trips by day of week")
+    fig_dow.update_layout(xaxis_title="Day of week", yaxis_title="Number of trips")
+    st.plotly_chart(fig_dow, use_container_width=True)
+
 
 
 def tab_hotspots(df: pd.DataFrame) -> None:
@@ -232,7 +279,6 @@ def tab_flows(df: pd.DataFrame) -> None:
     )
     flows.index = flows.index + 1
     st.dataframe(flows.rename(columns={"PU_Zone": "Pickup zone", "DO_Zone": "Dropoff zone"}))
-
     # Sankey of top flows
     zones = pd.unique(pd.concat([flows["PU_Zone"], flows["DO_Zone"]], ignore_index=True))
     index = {z: i for i, z in enumerate(zones)}
@@ -278,242 +324,391 @@ def tab_airports(df: pd.DataFrame) -> None:
     st.dataframe(flows.rename(columns={"PU_Zone": "Pickup zone", "DO_Zone": "Dropoff zone"}))
 
 
+def tab_predictions(fare_model, tip_model, zones_df: pd.DataFrame) -> None:
+    """Fare and tip prediction interface"""
+    st.header("🎯 Fare & Tip Prediction")
+    st.markdown("""
+    Enter trip details below to get an estimated fare amount and tip probability.
+    This tool uses machine learning models trained on historical NYC taxi data.
+    """)
+    
+    if fare_model is None or tip_model is None:
+        st.error("⚠️ Prediction models not available. Please ensure fare_model.pkl and tip_model.pkl exist in the workspace.")
+        return
+    
+    # Create zone options
+    zone_options = zones_df.sort_values('Zone')[['LocationID', 'Zone', 'Borough']].copy()
+    zone_options['display'] = zone_options['Zone'] + ' (' + zone_options['Borough'] + ')'
+    zone_dict = dict(zip(zone_options['display'], zone_options['LocationID']))
+    
+    st.markdown("### Trip Details")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**📍 Location Information**")
+        # Safely compute default indices as plain Python ints (Streamlit requires native int, not pandas Int64)
+        try:
+            default_pu_idx = int(zone_options[zone_options['Zone'] == 'Times Sq/Theatre District'].index[0])
+        except Exception:
+            default_pu_idx = 0
+        try:
+            default_do_idx = int(zone_options[zone_options['Zone'] == 'JFK Airport'].index[0])
+        except Exception:
+            # Fallback to 1 if possible else 0
+            default_do_idx = 1 if len(zone_options) > 1 else 0
+        pu_zone = st.selectbox(
+            "Pickup Location",
+            options=zone_options['display'].tolist(),
+            index=default_pu_idx,
+            help="Select the pickup zone"
+        )
+        
+        do_zone = st.selectbox(
+            "Dropoff Location",
+            options=zone_options['display'].tolist(),
+            index=default_do_idx,
+            help="Select the dropoff zone"
+        )
+        
+        trip_distance = st.number_input(
+            "Trip Distance (miles)",
+            min_value=0.1,
+            max_value=100.0,
+            value=5.0,
+            step=0.1,
+            help="Estimated trip distance in miles"
+        )
+    
+    with col2:
+        st.markdown("**⏱️ Trip & Passenger Details**")
+        trip_duration = st.number_input(
+            "Trip Duration (minutes)",
+            min_value=1,
+            max_value=300,
+            value=15,
+            step=1,
+            help="Estimated trip duration in minutes"
+        )
+        
+        passenger_count = st.slider(
+            "Passenger Count",
+            min_value=1,
+            max_value=6,
+            value=1,
+            help="Number of passengers"
+        )
+        
+        pickup_hour = st.slider(
+            "Pickup Hour (24-hour format)",
+            min_value=0,
+            max_value=23,
+            value=12,
+            help="Hour of day for pickup (0-23)"
+        )
+    
+    st.markdown("---")
+    
+    # Predict button
+    col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
+    with col_btn2:
+        predict_button = st.button("🔮 Predict Fare & Tip", type="primary", use_container_width=True)
+    
+    if predict_button:
+        # Prepare input features for model
+        input_data = pd.DataFrame({
+            'trip_distance': [trip_distance],
+            'passenger_count': [passenger_count],
+            'trip_duration_min': [trip_duration],
+            'pickup_hour': [pickup_hour]
+        })
+        
+        try:
+            # Make predictions
+            fare_pred = fare_model.predict(input_data)[0]
+            tip_prob = tip_model.predict_proba(input_data)[0][1]  # Probability of tip > $2
+            
+            # Display results in an attractive format
+            st.success("✅ Prediction Complete!")
+            st.markdown("### Prediction Results")
+            
+            # Main metrics
+            metric_col1, metric_col2, metric_col3 = st.columns(3)
+            
+            with metric_col1:
+                st.metric(
+                    label="💵 Predicted Fare",
+                    value=f"${fare_pred:.2f}",
+                    help="Estimated base fare amount"
+                )
+            
+            with metric_col2:
+                st.metric(
+                    label="🎁 Tip Probability",
+                    value=f"{tip_prob*100:.1f}%",
+                    help="Likelihood of receiving a tip > $2"
+                )
+            
+            with metric_col3:
+                estimated_tip = fare_pred * 0.15 * tip_prob
+                st.metric(
+                    label="💰 Expected Tip",
+                    value=f"${estimated_tip:.2f}",
+                    help="Estimated tip amount (15% avg when tipped)"
+                )
+            # Section below (Trip Summary & model info) removed per user request
+            # If needed in the future, consider adding a toggle to show/hide detailed breakdown.
+                
+        except Exception as e:
+            st.error(f"❌ Prediction error: {e}")
+            st.info("Please check that all input values are valid and try again.")
+
+
 def main() -> None:
     st.set_page_config(page_title="NYC Yellow Taxi – EDA", layout="wide")
-    st.title("NYC Yellow Taxi – Exploratory Dashboard")
+    
+    st.sidebar.title("🚕 NYC Taxi Dashboard")
+    page = st.sidebar.radio(
+        "Navigation",
+        ["📊 Analytics Dashboard", "🎯 Fare Prediction"],
+        help="Select a page to view"
+    )
+    
+    if page == "🎯 Fare Prediction":
+        st.title("NYC Yellow Taxi – Fare Prediction")
+        fare_model, tip_model = load_models()
+        zones_df = load_zone_lookup()
+        tab_predictions(fare_model, tip_model, zones_df)
+    else:
+        st.title("NYC Yellow Taxi – Exploratory Dashboard")
+        df_all = load_data()
+        df = filter_df(df_all)
 
-    df_all = load_data()
-    df = filter_df(df_all)
-
-    tabs = st.tabs(["Overview", "Trends", "Time Analysis", "Map", "Hotspots", "Zones", "Flows", "Airports", "Fare Prediction", "Tip Prediction"])
-    with tabs[0]:
-        tab_overview(df)
-    with tabs[1]:
-        tab_trends(df)
-    with tabs[2]:
-        render_time_analysis(df)
-    with tabs[3]:
-        st.markdown("""
-        **Interactive NYC Taxi Zone Heatmap**: Explore pickup and dropoff demand across all 263 official taxi zones.
-        Hover over zones to see names, trip counts, and rankings. Use the comparison view to spot imbalances.
-        """)
-        geojson = load_zones_geojson()
-        
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            mode = st.radio("Show", ["Pickups", "Dropoffs", "Side-by-side"], horizontal=True, key="map_mode")
-        
-        show_top = False
-        with col2:
-            if mode != "Side-by-side":
-                show_top = st.checkbox("Show top 10 zones summary", value=True)
-        if geojson is None:
-            st.info("Taxi zone shapes unavailable. Upload a taxi_zones.geojson below or we will show a borough-level fallback.")
-            uploaded = st.file_uploader("Upload NYC taxi zones GeoJSON", type=["geojson", "json"], accept_multiple_files=False)
-            if uploaded is not None:
-                try:
-                    content = uploaded.read()
-                    text = content.decode("utf-8-sig", errors="replace").strip()
-                    obj = json.loads(text)
-                    if isinstance(obj, dict) and obj.get("features"):
-                        os.makedirs(os.path.dirname(ZONES_GEOJSON_PATH), exist_ok=True)
-                        with open(ZONES_GEOJSON_PATH, "w", encoding="utf-8") as f:
-                            json.dump(obj, f)
-                        st.success("GeoJSON uploaded and cached. Please toggle the Show control or reload to render the map.")
-                        # Clear cache to reload
-                        load_zones_geojson.clear()
-                        geojson = obj
-                    else:
-                        st.error("Uploaded file is not a valid GeoJSON FeatureCollection.")
-                except Exception as e:
-                    st.error(f"Failed to parse uploaded GeoJSON: {e}")
-        if geojson is None:
-            st.info("Showing borough-level hotspot map as a fallback.")
-            # Fallback: borough-level bubble map using known centroids (approximate)
-            borough_coords = {
-                "Manhattan": (40.7831, -73.9712),
-                "Brooklyn": (40.6782, -73.9442),
-                "Queens": (40.7282, -73.7949),
-                "Bronx": (40.8448, -73.8648),
-                "Staten Island": (40.5795, -74.1502),
-                "EWR": (40.6895, -74.1745),  # Newark Airport
-            }
-            if mode == "Pickups":
-                agg = df.groupby("PU_Borough", as_index=False).agg(Trips=("VendorID", "count"))
-                agg = agg.rename(columns={"PU_Borough": "Borough"})
-                title = "Pickup hotspots by borough"
-            else:
-                agg = df.groupby("DO_Borough", as_index=False).agg(Trips=("VendorID", "count"))
-                agg = agg.rename(columns={"DO_Borough": "Borough"})
-                title = "Dropoff hotspots by borough"
-            agg["lat"] = agg["Borough"].map(lambda b: borough_coords.get(b, (None, None))[0])
-            agg["lon"] = agg["Borough"].map(lambda b: borough_coords.get(b, (None, None))[1])
-            agg = agg.dropna(subset=["lat", "lon"])
-            fig = px.scatter_mapbox(
-                agg,
-                lat="lat",
-                lon="lon",
-                size="Trips",
-                color="Trips",
-                color_continuous_scale="YlOrRd",
-                size_max=60,
-                zoom=9,
-                hover_name="Borough",
-                hover_data={"Trips": True, "lat": False, "lon": False},
-                title=title,
-                mapbox_style="open-street-map",
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        elif geojson is not None:
-            props = geojson.get("features", [{}])[0].get("properties", {})
-            # Detect ID field (case-insensitive)
-            id_field = None
-            zone_field = None
-            borough_field = None
-            for key in props.keys():
-                if key.lower() == 'locationid':
-                    id_field = key
-                if key.lower() == 'zone':
-                    zone_field = key
-                if key.lower() == 'borough':
-                    borough_field = key
-            if id_field is None:
-                id_field = 'OBJECTID' if 'OBJECTID' in props else 'objectid'
-            feature_key = f"properties.{id_field}"
+        tabs = st.tabs(["Overview", "Trends", "Time Analysis", "Map", "Hotspots", "Zones", "Flows", "Airports"])
+        with tabs[0]:
+            tab_overview(df)
+        with tabs[1]:
+            tab_trends(df)
+        with tabs[2]:
+            tab_time_analysis(df)
+        with tabs[3]:
+            st.markdown("""
+            **Interactive NYC Taxi Zone Heatmap**: Explore pickup and dropoff demand across all 263 official taxi zones.
+            Hover over zones to see names, trip counts, and rankings. Use the comparison view to spot imbalances.
+            """)
+            geojson = load_zones_geojson()
             
-            # Build zone name mapping from GeoJSON
-            zone_map = {}
-            borough_map = {}
-            if zone_field and borough_field:
-                for feat in geojson['features']:
-                    loc_id = feat['properties'].get(id_field)
-                    zone_map[loc_id] = feat['properties'].get(zone_field, 'Unknown')
-                    borough_map[loc_id] = feat['properties'].get(borough_field, 'Unknown')
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                mode = st.radio("Show", ["Pickups", "Dropoffs", "Side-by-side"], horizontal=True, key="map_mode")
             
-            if mode == "Side-by-side":
-                # Show both pickups and dropoffs
-                pu_agg = df.groupby("PULocationID", as_index=False).agg(Trips=("VendorID", "count"))
-                pu_agg = pu_agg.rename(columns={"PULocationID": "LocationID", "Trips": "Pickups"})
-                do_agg = df.groupby("DOLocationID", as_index=False).agg(Trips=("VendorID", "count"))
-                do_agg = do_agg.rename(columns={"DOLocationID": "LocationID", "Trips": "Dropoffs"})
-                agg = pu_agg.merge(do_agg, on="LocationID", how="outer").fillna(0)
-                agg["Net_Flow"] = agg["Pickups"] - agg["Dropoffs"]
-                
-                sample_geojson_id = geojson['features'][0]['properties'].get(id_field)
-                if isinstance(sample_geojson_id, str):
-                    agg["LocationID"] = agg["LocationID"].astype(str)
-                else:
-                    agg["LocationID"] = agg["LocationID"].astype(int)
-                
-                agg["Zone"] = agg["LocationID"].map(zone_map)
-                agg["Borough"] = agg["LocationID"].map(borough_map)
-                
-                c1, c2 = st.columns(2)
-                with c1:
-                    fig1 = px.choropleth(
-                        agg,
-                        geojson=geojson,
-                        locations="LocationID",
-                        featureidkey=feature_key,
-                        color="Pickups",
-                        color_continuous_scale="YlOrRd",
-                        hover_data={"Zone": True, "Borough": True, "Pickups": ":,", "LocationID": False},
-                        title="Pickups by zone",
-                    )
-                    fig1.update_geos(fitbounds="locations", visible=False)
-                    fig1.update_layout(margin={"r":0,"t":40,"l":0,"b":0}, coloraxis_colorbar_title_text="Pickups")
-                    st.plotly_chart(fig1, use_container_width=True)
-                
-                with c2:
-                    fig2 = px.choropleth(
-                        agg,
-                        geojson=geojson,
-                        locations="LocationID",
-                        featureidkey=feature_key,
-                        color="Dropoffs",
-                        color_continuous_scale="Blues",
-                        hover_data={"Zone": True, "Borough": True, "Dropoffs": ":,", "LocationID": False},
-                        title="Dropoffs by zone",
-                    )
-                    fig2.update_geos(fitbounds="locations", visible=False)
-                    fig2.update_layout(margin={"r":0,"t":40,"l":0,"b":0}, coloraxis_colorbar_title_text="Dropoffs")
-                    st.plotly_chart(fig2, use_container_width=True)
-                
-                # Net flow viz
-                st.markdown("**Net Flow**: Positive = more pickups (origins), Negative = more dropoffs (destinations)")
-                fig3 = px.choropleth(
-                    agg,
-                    geojson=geojson,
-                    locations="LocationID",
-                    featureidkey=feature_key,
-                    color="Net_Flow",
-                    color_continuous_scale="RdBu_r",
-                    color_continuous_midpoint=0,
-                    hover_data={"Zone": True, "Borough": True, "Net_Flow": ":,", "Pickups": ":,", "Dropoffs": ":,", "LocationID": False},
-                    title="Net flow (Pickups − Dropoffs)",
-                )
-                fig3.update_geos(fitbounds="locations", visible=False)
-                fig3.update_layout(margin={"r":0,"t":40,"l":0,"b":0}, coloraxis_colorbar_title_text="Net Flow")
-                st.plotly_chart(fig3, use_container_width=True)
-                
-            else:
+            show_top = False
+            with col2:
+                if mode != "Side-by-side":
+                    show_top = st.checkbox("Show top 10 zones summary", value=True)
+            
+            if geojson is None:
+                st.info("Taxi zone shapes unavailable. Upload a taxi_zones.geojson below or we will show a borough-level fallback.")
+                uploaded = st.file_uploader("Upload NYC taxi zones GeoJSON", type=["geojson", "json"], accept_multiple_files=False)
+                if uploaded is not None:
+                    try:
+                        content = uploaded.read()
+                        text = content.decode("utf-8-sig", errors="replace").strip()
+                        obj = json.loads(text)
+                        if isinstance(obj, dict) and obj.get("features"):
+                            os.makedirs(os.path.dirname(ZONES_GEOJSON_PATH), exist_ok=True)
+                            with open(ZONES_GEOJSON_PATH, "w", encoding="utf-8") as f:
+                                json.dump(obj, f)
+                            st.success("GeoJSON uploaded and cached. Please toggle the Show control or reload to render the map.")
+                            load_zones_geojson.clear()
+                            geojson = obj
+                        else:
+                            st.error("Uploaded file is not a valid GeoJSON FeatureCollection.")
+                    except Exception as e:
+                        st.error(f"Failed to parse uploaded GeoJSON: {e}")
+            
+            if geojson is None:
+                st.info("Showing borough-level hotspot map as a fallback.")
+                borough_coords = {
+                    "Manhattan": (40.7831, -73.9712),
+                    "Brooklyn": (40.6782, -73.9442),
+                    "Queens": (40.7282, -73.7949),
+                    "Bronx": (40.8448, -73.8648),
+                    "Staten Island": (40.5795, -74.1502),
+                    "EWR": (40.6895, -74.1745),
+                }
                 if mode == "Pickups":
-                    agg = df.groupby("PULocationID", as_index=False).agg(Trips=("VendorID", "count"))
-                    agg = agg.rename(columns={"PULocationID": "LocationID"})
-                    title = "Pickup demand by taxi zone"
-                    color_scale = "YlOrRd"
+                    agg = df.groupby("PU_Borough", as_index=False).agg(Trips=("VendorID", "count"))
+                    agg = agg.rename(columns={"PU_Borough": "Borough"})
+                    title = "Pickup hotspots by borough"
                 else:
-                    agg = df.groupby("DOLocationID", as_index=False).agg(Trips=("VendorID", "count"))
-                    agg = agg.rename(columns={"DOLocationID": "LocationID"})
-                    title = "Dropoff demand by taxi zone"
-                    color_scale = "Blues"
-                
-                # Match ID type from GeoJSON
-                sample_geojson_id = geojson['features'][0]['properties'].get(id_field)
-                if isinstance(sample_geojson_id, str):
-                    agg["LocationID"] = agg["LocationID"].astype(str)
-                else:
-                    agg["LocationID"] = agg["LocationID"].astype(int)
-                
-                agg["Zone"] = agg["LocationID"].map(zone_map)
-                agg["Borough"] = agg["LocationID"].map(borough_map)
-                agg["Rank"] = agg["Trips"].rank(ascending=False, method="min").astype(int)
-                
-                # Top zones summary
-                if show_top:
-                    top10 = agg.nlargest(10, "Trips")[["Zone", "Borough", "Trips"]].reset_index(drop=True)
-                    top10.index = top10.index + 1
-                    st.markdown(f"**Top 10 {mode} zones**")
-                    st.dataframe(top10, use_container_width=True, height=280)
-                
-                fig = px.choropleth(
+                    agg = df.groupby("DO_Borough", as_index=False).agg(Trips=("VendorID", "count"))
+                    agg = agg.rename(columns={"DO_Borough": "Borough"})
+                    title = "Dropoff hotspots by borough"
+                agg["lat"] = agg["Borough"].map(lambda b: borough_coords.get(b, (None, None))[0])
+                agg["lon"] = agg["Borough"].map(lambda b: borough_coords.get(b, (None, None))[1])
+                agg = agg.dropna(subset=["lat", "lon"])
+                fig = px.scatter_mapbox(
                     agg,
-                    geojson=geojson,
-                    locations="LocationID",
-                    featureidkey=feature_key,
+                    lat="lat",
+                    lon="lon",
+                    size="Trips",
                     color="Trips",
-                    color_continuous_scale=color_scale,
-                    hover_data={"Zone": True, "Borough": True, "Trips": ":,", "Rank": True, "LocationID": False},
+                    color_continuous_scale="YlOrRd",
+                    size_max=60,
+                    zoom=9,
+                    hover_name="Borough",
+                    hover_data={"Trips": True, "lat": False, "lon": False},
                     title=title,
-                )
-                fig.update_geos(fitbounds="locations", visible=False)
-                fig.update_layout(
-                    margin={"r":0,"t":50,"l":0,"b":0},
-                    coloraxis_colorbar_title_text="Trips"
+                    mapbox_style="open-street-map",
                 )
                 st.plotly_chart(fig, use_container_width=True)
-    with tabs[4]:
-        tab_hotspots(df)
-    with tabs[5]:
-        tab_zones(df)
-    with tabs[6]:
-        tab_flows(df)
-    with tabs[7]:
-        tab_airports(df)
-    with tabs[8]:
-        render_fare_prediction(df)
-    with tabs[9]:
-        render_tip_prediction(df)
+            elif geojson is not None:
+                props = geojson.get("features", [{}])[0].get("properties", {})
+                # Detect ID field (case-insensitive)
+                id_field = None
+                zone_field = None
+                borough_field = None
+                for key in props.keys():
+                    if key.lower() == 'locationid':
+                        id_field = key
+                    if key.lower() == 'zone':
+                        zone_field = key
+                    if key.lower() == 'borough':
+                        borough_field = key
+                if id_field is None:
+                    id_field = 'OBJECTID' if 'OBJECTID' in props else 'objectid'
+                feature_key = f"properties.{id_field}"
+                
+                # Build zone name mapping from GeoJSON
+                zone_map = {}
+                borough_map = {}
+                if zone_field and borough_field:
+                    for feat in geojson['features']:
+                        loc_id = feat['properties'].get(id_field)
+                        zone_map[loc_id] = feat['properties'].get(zone_field, 'Unknown')
+                        borough_map[loc_id] = feat['properties'].get(borough_field, 'Unknown')
+                
+                if mode == "Side-by-side":
+                    # Show both pickups and dropoffs
+                    pu_agg = df.groupby("PULocationID", as_index=False).agg(Trips=("VendorID", "count"))
+                    pu_agg = pu_agg.rename(columns={"PULocationID": "LocationID", "Trips": "Pickups"})
+                    do_agg = df.groupby("DOLocationID", as_index=False).agg(Trips=("VendorID", "count"))
+                    do_agg = do_agg.rename(columns={"DOLocationID": "LocationID", "Trips": "Dropoffs"})
+                    agg = pu_agg.merge(do_agg, on="LocationID", how="outer").fillna(0)
+                    agg["Net_Flow"] = agg["Pickups"] - agg["Dropoffs"]
+                    
+                    sample_geojson_id = geojson['features'][0]['properties'].get(id_field)
+                    if isinstance(sample_geojson_id, str):
+                        agg["LocationID"] = agg["LocationID"].astype(str)
+                    else:
+                        agg["LocationID"] = agg["LocationID"].astype(int)
+                    
+                    agg["Zone"] = agg["LocationID"].map(zone_map)
+                    agg["Borough"] = agg["LocationID"].map(borough_map)
+                    
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        fig1 = px.choropleth(
+                            agg,
+                            geojson=geojson,
+                            locations="LocationID",
+                            featureidkey=feature_key,
+                            color="Pickups",
+                            color_continuous_scale="YlOrRd",
+                            hover_data={"Zone": True, "Borough": True, "Pickups": ":,", "LocationID": False},
+                            title="Pickups by zone",
+                        )
+                        fig1.update_geos(fitbounds="locations", visible=False)
+                        fig1.update_layout(margin={"r":0,"t":40,"l":0,"b":0}, coloraxis_colorbar_title_text="Pickups")
+                        st.plotly_chart(fig1, use_container_width=True)
+                    
+                    with c2:
+                        fig2 = px.choropleth(
+                            agg,
+                            geojson=geojson,
+                            locations="LocationID",
+                            featureidkey=feature_key,
+                            color="Dropoffs",
+                            color_continuous_scale="Blues",
+                            hover_data={"Zone": True, "Borough": True, "Dropoffs": ":,", "LocationID": False},
+                            title="Dropoffs by zone",
+                        )
+                        fig2.update_geos(fitbounds="locations", visible=False)
+                        fig2.update_layout(margin={"r":0,"t":40,"l":0,"b":0}, coloraxis_colorbar_title_text="Dropoffs")
+                        st.plotly_chart(fig2, use_container_width=True)
+                    
+                    # Net flow viz
+                    st.markdown("**Net Flow**: Positive = more pickups (origins), Negative = more dropoffs (destinations)")
+                    fig3 = px.choropleth(
+                        agg,
+                        geojson=geojson,
+                        locations="LocationID",
+                        featureidkey=feature_key,
+                        color="Net_Flow",
+                        color_continuous_scale="RdBu_r",
+                        color_continuous_midpoint=0,
+                        hover_data={"Zone": True, "Borough": True, "Net_Flow": ":,", "Pickups": ":,", "Dropoffs": ":,", "LocationID": False},
+                        title="Net flow (Pickups − Dropoffs)",
+                    )
+                    fig3.update_geos(fitbounds="locations", visible=False)
+                    fig3.update_layout(margin={"r":0,"t":40,"l":0,"b":0}, coloraxis_colorbar_title_text="Net Flow")
+                    st.plotly_chart(fig3, use_container_width=True)
+                    
+                else:
+                    if mode == "Pickups":
+                        agg = df.groupby("PULocationID", as_index=False).agg(Trips=("VendorID", "count"))
+                        agg = agg.rename(columns={"PULocationID": "LocationID"})
+                        title = "Pickup demand by taxi zone"
+                        color_scale = "YlOrRd"
+                    else:
+                        agg = df.groupby("DOLocationID", as_index=False).agg(Trips=("VendorID", "count"))
+                        agg = agg.rename(columns={"DOLocationID": "LocationID"})
+                        title = "Dropoff demand by taxi zone"
+                        color_scale = "Blues"
+                    
+                    # Match ID type from GeoJSON
+                    sample_geojson_id = geojson['features'][0]['properties'].get(id_field)
+                    if isinstance(sample_geojson_id, str):
+                        agg["LocationID"] = agg["LocationID"].astype(str)
+                    else:
+                        agg["LocationID"] = agg["LocationID"].astype(int)
+                    
+                    agg["Zone"] = agg["LocationID"].map(zone_map)
+                    agg["Borough"] = agg["LocationID"].map(borough_map)
+                    agg["Rank"] = agg["Trips"].rank(ascending=False, method="min").astype(int)
+                    
+                    # Top zones summary
+                    if show_top:
+                        top10 = agg.nlargest(10, "Trips")[["Zone", "Borough", "Trips"]].reset_index(drop=True)
+                        top10.index = top10.index + 1
+                        st.markdown(f"**Top 10 {mode} zones**")
+                        st.dataframe(top10, use_container_width=True, height=280)
+                    
+                    fig = px.choropleth(
+                        agg,
+                        geojson=geojson,
+                        locations="LocationID",
+                        featureidkey=feature_key,
+                        color="Trips",
+                        color_continuous_scale=color_scale,
+                        hover_data={"Zone": True, "Borough": True, "Trips": ":,", "Rank": True, "LocationID": False},
+                        title=title,
+                    )
+                    fig.update_geos(fitbounds="locations", visible=False)
+                    fig.update_layout(
+                        margin={"r":0,"t":50,"l":0,"b":0},
+                        coloraxis_colorbar_title_text="Trips"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+        with tabs[4]:
+            tab_hotspots(df)
+        with tabs[5]:
+            tab_zones(df)
+        with tabs[6]:
+            tab_flows(df)
+        with tabs[7]:
+            tab_airports(df)
 
 
 if __name__ == "__main__":
