@@ -253,48 +253,22 @@ def tab_flows(df: pd.DataFrame) -> None:
         .head(k)
     )
     st.dataframe(flows.rename(columns={"PU_Zone": "Pickup zone", "DO_Zone": "Dropoff zone"}))
-    # Sankey of top flows (fixed: previously duplicated every zone on target side creating visual clutter)
-    # Build a single set of nodes so zones that appear as both pickup and dropoff are unified.
+    # Sankey of top flows
     zones = pd.unique(pd.concat([flows["PU_Zone"], flows["DO_Zone"]], ignore_index=True))
-    zone_index = {z: i for i, z in enumerate(zones)}
-    sources = flows["PU_Zone"].map(zone_index).tolist()
-    targets = flows["DO_Zone"].map(zone_index).tolist()
+    index = {z: i for i, z in enumerate(zones)}
+    sources = [index[z] for z in flows["PU_Zone"]]
+    targets = [index[z] + len(zones) for z in flows["DO_Zone"]]  # separate target space
+    labels = list(zones) + [f"{z}" for z in zones]
     values = flows["Trips"].tolist()
-
-    # Optional: color nodes by total involvement (sum of trips where they are source or target)
-    involvement = {z: 0 for z in zones}
-    for (pu, do, trips) in flows[["PU_Zone", "DO_Zone", "Trips"]].itertuples(index=False):
-        involvement[pu] += trips
-        involvement[do] += trips
-    max_involve = max(involvement.values()) if involvement else 1
-    # Generate a light-to-strong blue scale based on involvement
-    node_colors = [f"rgba(30, 144, 255, {0.3 + 0.7*involvement[z]/max_involve:.3f})" for z in zones]
-
     sankey = go.Figure(
         data=[
             go.Sankey(
-                arrangement="snap",
-                node=dict(
-                    label=list(zones),
-                    pad=12,
-                    thickness=14,
-                    line=dict(color="rgba(255,255,255,0.15)", width=1),
-                    color=node_colors,
-                ),
-                link=dict(
-                    source=sources,
-                    target=targets,
-                    value=values,
-                    hovertemplate="%{source.label} → %{target.label}<br>Trips: %{value:,}<extra></extra>",
-                ),
+                node=dict(label=labels, pad=10, thickness=12),
+                link=dict(source=sources, target=targets, value=values),
             )
         ]
     )
-    sankey.update_layout(
-        title_text="Top flows by trips",
-        margin=dict(l=10, r=10, t=40, b=10),
-        font=dict(size=12),
-    )
+    sankey.update_layout(title_text="Top flows by trips")
     st.plotly_chart(sankey, use_container_width=True)
 
 
