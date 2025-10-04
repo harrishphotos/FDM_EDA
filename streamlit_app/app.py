@@ -8,11 +8,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import joblib
 
-
-# Determine the workspace root dynamically
-# Assumes the script is in streamlit_app and the data is in the parent directory
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WORKSPACE_ROOT = os.path.dirname(SCRIPT_DIR)
+WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CSV_PATH = os.path.join(WORKSPACE_ROOT, "NYC_YELLOW_TAXI_CLEAN.csv")
 PARQUET_PATH = os.path.join(WORKSPACE_ROOT, "NYC_YELLOW_TAXI_CLEAN.parquet")
 ZONES_GEOJSON_PATH = os.path.join(WORKSPACE_ROOT, "Docs", "taxi_zones.geojson")
@@ -193,7 +189,35 @@ def tab_trends(df: pd.DataFrame) -> None:
     st.plotly_chart(fig3, use_container_width=True)
 
 
- 
+def tab_time_analysis(df: pd.DataFrame) -> None:
+    st.markdown("""
+    Analyze trip patterns by hour, day of week, and time of day to identify peak periods and optimize operations.
+    """)
+    
+    st.markdown("### Hourly Patterns")
+    hourly = df.groupby("pickup_hour", as_index=False).agg(
+        Trips=("VendorID", "count"),
+        Avg_Fare=("fare_amount", "mean"),
+        Avg_Duration=("trip_duration_min", "mean")
+    )
+    
+    fig_hourly = px.bar(hourly, x="pickup_hour", y="Trips", title="Trips by hour of day")
+    fig_hourly.update_layout(xaxis_title="Hour of day", yaxis_title="Number of trips")
+    st.plotly_chart(fig_hourly, use_container_width=True)
+    
+    st.markdown("### Day of week patterns")
+    dow_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    dow = df.groupby("pickup_dow", as_index=False).agg(
+        Trips=("VendorID", "count"),
+        Avg_Fare=("fare_amount", "mean")
+    )
+    dow["pickup_dow"] = pd.Categorical(dow["pickup_dow"], categories=dow_order, ordered=True)
+    dow = dow.sort_values("pickup_dow")
+    
+    fig_dow = px.bar(dow, x="pickup_dow", y="Trips", title="Trips by day of week")
+    fig_dow.update_layout(xaxis_title="Day of week", yaxis_title="Number of trips")
+    st.plotly_chart(fig_dow, use_container_width=True)
+
 
 
 def tab_hotspots(df: pd.DataFrame) -> None:
@@ -251,7 +275,9 @@ def tab_flows(df: pd.DataFrame) -> None:
         .agg(Trips=("VendorID", "count"), Revenue=("total_amount", "sum"))
         .sort_values("Trips", ascending=False)
         .head(k)
+        .reset_index(drop=True)
     )
+    flows.index = flows.index + 1
     st.dataframe(flows.rename(columns={"PU_Zone": "Pickup zone", "DO_Zone": "Dropoff zone"}))
     # Sankey of top flows
     zones = pd.unique(pd.concat([flows["PU_Zone"], flows["DO_Zone"]], ignore_index=True))
@@ -279,13 +305,23 @@ def tab_flows(df: pd.DataFrame) -> None:
 
 
 def tab_airports(df: pd.DataFrame) -> None:
+    st.markdown("""
+    Airport trips are identified by zone names containing "Airport" (JFK, LaGuardia, Newark).
+    Below: top 20 airport origin→destination routes.
+    """)
     # Heuristic by zone name contains "Airport"
     airport_mask = df["PU_Zone"].str.contains("Airport", case=False, na=False) | df["DO_Zone"].str.contains("Airport", case=False, na=False)
     adf = df.loc[airport_mask]
-    st.write(f"Airport-related trips: {len(adf):,}")
-    flows = adf.groupby(["PU_Zone", "DO_Zone"], as_index=False).agg(trips=("VendorID", "count"), revenue=("total_amount", "sum"))
-    flows = flows.sort_values("trips", ascending=False).head(20)
-    st.dataframe(flows)
+    st.write(f"**Airport-related trips**: {len(adf):,}")
+    flows = (
+        adf.groupby(["PU_Zone", "DO_Zone"], as_index=False)
+        .agg(Trips=("VendorID", "count"), Revenue=("total_amount", "sum"))
+        .sort_values("Trips", ascending=False)
+        .head(20)
+        .reset_index(drop=True)
+    )
+    flows.index = flows.index + 1
+    st.dataframe(flows.rename(columns={"PU_Zone": "Pickup zone", "DO_Zone": "Dropoff zone"}))
 
 
 def tab_predictions(fare_model, tip_model, zones_df: pd.DataFrame) -> None:
@@ -431,7 +467,6 @@ def tab_predictions(fare_model, tip_model, zones_df: pd.DataFrame) -> None:
 def main() -> None:
     st.set_page_config(page_title="NYC Yellow Taxi – EDA", layout="wide")
     
-    # Sidebar navigation
     st.sidebar.title("🚕 NYC Taxi Dashboard")
     page = st.sidebar.radio(
         "Navigation",
@@ -440,23 +475,23 @@ def main() -> None:
     )
     
     if page == "🎯 Fare Prediction":
-        # Prediction page
         st.title("NYC Yellow Taxi – Fare Prediction")
         fare_model, tip_model = load_models()
         zones_df = load_zone_lookup()
         tab_predictions(fare_model, tip_model, zones_df)
     else:
-        # Original analytics dashboard
         st.title("NYC Yellow Taxi – Exploratory Dashboard")
         df_all = load_data()
         df = filter_df(df_all)
 
-        tabs = st.tabs(["Overview", "Trends", "Map", "Hotspots", "Zones", "Flows", "Airports"])
+        tabs = st.tabs(["Overview", "Trends", "Time Analysis", "Map", "Hotspots", "Zones", "Flows", "Airports"])
         with tabs[0]:
             tab_overview(df)
         with tabs[1]:
             tab_trends(df)
         with tabs[2]:
+            tab_time_analysis(df)
+        with tabs[3]:
             st.markdown("""
             **Interactive NYC Taxi Zone Heatmap**: Explore pickup and dropoff demand across all 263 official taxi zones.
             Hover over zones to see names, trip counts, and rankings. Use the comparison view to spot imbalances.
@@ -466,9 +501,12 @@ def main() -> None:
             col1, col2 = st.columns([1, 1])
             with col1:
                 mode = st.radio("Show", ["Pickups", "Dropoffs", "Side-by-side"], horizontal=True, key="map_mode")
+            
+            show_top = False
             with col2:
                 if mode != "Side-by-side":
                     show_top = st.checkbox("Show top 10 zones summary", value=True)
+            
             if geojson is None:
                 st.info("Taxi zone shapes unavailable. Upload a taxi_zones.geojson below or we will show a borough-level fallback.")
                 uploaded = st.file_uploader("Upload NYC taxi zones GeoJSON", type=["geojson", "json"], accept_multiple_files=False)
@@ -482,23 +520,22 @@ def main() -> None:
                             with open(ZONES_GEOJSON_PATH, "w", encoding="utf-8") as f:
                                 json.dump(obj, f)
                             st.success("GeoJSON uploaded and cached. Please toggle the Show control or reload to render the map.")
-                            # Clear cache to reload
                             load_zones_geojson.clear()
                             geojson = obj
                         else:
                             st.error("Uploaded file is not a valid GeoJSON FeatureCollection.")
                     except Exception as e:
                         st.error(f"Failed to parse uploaded GeoJSON: {e}")
+            
             if geojson is None:
                 st.info("Showing borough-level hotspot map as a fallback.")
-                # Fallback: borough-level bubble map using known centroids (approximate)
                 borough_coords = {
                     "Manhattan": (40.7831, -73.9712),
                     "Brooklyn": (40.6782, -73.9442),
                     "Queens": (40.7282, -73.7949),
                     "Bronx": (40.8448, -73.8648),
                     "Staten Island": (40.5795, -74.1502),
-                    "EWR": (40.6895, -74.1745),  # Newark Airport
+                    "EWR": (40.6895, -74.1745),
                 }
                 if mode == "Pickups":
                     agg = df.groupby("PU_Borough", as_index=False).agg(Trips=("VendorID", "count"))
@@ -664,13 +701,13 @@ def main() -> None:
                         coloraxis_colorbar_title_text="Trips"
                     )
                     st.plotly_chart(fig, use_container_width=True)
-        with tabs[3]:
-            tab_hotspots(df)
         with tabs[4]:
-            tab_zones(df)
+            tab_hotspots(df)
         with tabs[5]:
-            tab_flows(df)
+            tab_zones(df)
         with tabs[6]:
+            tab_flows(df)
+        with tabs[7]:
             tab_airports(df)
 
 

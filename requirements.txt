@@ -1,0 +1,17 @@
+# NYC Yellow Taxi Data Intelligence Platform
+# Python dependencies for Streamlit Cloud deployment
+
+# Core data processing
+pandas==2.3.3
+numpy==2.3.3
+
+# Streamlit framework
+streamlit==1.50.0
+
+# Visualization
+plotly==6.3.0
+
+# Machine learning
+scikit-learn==1.7.2
+joblib==1.5.2
+
